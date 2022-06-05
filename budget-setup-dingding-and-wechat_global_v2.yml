@@ -1,0 +1,936 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: For Global region solution to automatically create budget plan send notification to SNS and to Dingding and wechat
+Parameters:
+  CreateDingding:
+    Description: Create Dingding notification, Yes means create, no means not create
+    Default: yes
+    Type: String
+    AllowedValues:
+      - yes
+      - no
+    ConstraintDescription: must specify yes or no，必须要输入是或者否
+  CreateWechat:
+    Description: Create Wechat notification, Yes means create, no means not create
+    Default: yes
+    Type: String
+    AllowedValues:
+      - yes
+      - no
+    ConstraintDescription: must specify yes or no
+
+  email1:
+    Type: String
+    Description: First Email Address to receive notification
+    Default: example1@amazon.com
+  email2:
+    Type: String
+    Description: Second Email Address to receive notification
+    Default: example2@amazon.com
+
+  Credit:
+    Type: String
+    Description: Include credit or not, if true, credit(for exmaple -1000) is included, your cost is deduced by credit in your account, if false, credit is not taken into account, threshold is your all cost.
+    Default: false
+    AllowedValues:
+      - True
+      - False
+  StopEc2:
+    Type: String
+    Description: Stop all EC2 instance when usage reach 99%
+    Default: false
+    AllowedValues:
+      - True
+      - False
+    
+
+
+  Thresholdmonthly:
+    Type: Number
+    Description: Monthly budget threshold , Unit USD
+    Default: 500
+  Thresholdannually:
+    Type: Number
+    Description: annually budget threshold , Unit USD
+    Default: 1000
+  Dingding: 
+    Type: String
+    Description: Dingding URL to receive notification
+    Default: https://oapi.dingtalk.com/robot/send?access_token=79fbe7044854f8bb407097457abf3e6a3f9da168558c8381a08ada1f1bcd4c96
+  wechatbotURL: 
+    Type: String
+    Description: wechatbot URL to receive notification
+    Default: https://oapi.dingtalk.com/robot/send?access_token=79fbe7044854f8bb407097457abf3e6a3f9da168558c8381a08ada1f1bcd4c96
+   
+
+
+Conditions:
+  CreateDingding: !Equals 
+    - !Ref CreateDingding
+    - yes
+
+  NoDingding: !Equals 
+    - !Ref CreateDingding
+    - no
+
+  CreateWechat: !Equals 
+    - !Ref CreateWechat
+    - yes
+
+  NoWechat: !Equals 
+    - !Ref CreateWechat
+    - no
+  StopEc2: !Equals 
+    - !Ref StopEc2
+    - yes
+
+
+Mappings: 
+  RegionMap: 
+    ap-northeast-1:
+      Layer: arn:aws:lambda:ap-northeast-1:249908578461:layer:AWSLambda-Python-AWS-SDK:4
+    us-east-1:
+      Layer: arn:aws:lambda:us-east-1:668099181075:layer:AWSLambda-Python-AWS-SDK:4
+    ap-southeast-1:
+      Layer: arn:aws:lambda:ap-southeast-1:468957933125:layer:AWSLambda-Python-AWS-SDK:4
+    eu-west-1:
+      Layer: arn:aws:lambda:eu-west-1:399891621064:layer:AWSLambda-Python-AWS-SDK:4
+    us-west-1:
+      Layer: arn:aws:lambda:us-west-1:325793726646:layer:AWSLambda-Python-AWS-SDK:4
+    ap-east-1:
+      Layer: arn:aws:lambda:ap-east-1:118857876118:layer:AWSLambda-Python-AWS-SDK:4
+    ap-northeast-2:
+      Layer: arn:aws:lambda:ap-northeast-2:296580773974:layer:AWSLambda-Python-AWS-SDK:4
+    ap-northeast-3:
+      Layer: arn:aws:lambda:ap-northeast-3:961244031340:layer:AWSLambda-Python-AWS-SDK:4
+    ap-south-1:
+      Layer: arn:aws:lambda:ap-south-1:631267018583:layer:AWSLambda-Python-AWS-SDK:4
+    ap-southeast-2:
+      Layer: arn:aws:lambda:ap-southeast-2:817496625479:layer:AWSLambda-Python-AWS-SDK:4
+    ca-central-1:
+      Layer: arn:aws:lambda:ca-central-1:778625758767:layer:AWSLambda-Python-AWS-SDK:4
+    eu-central-1:
+      Layer: arn:aws:lambda:eu-central-1:292169987271:layer:AWSLambda-Python-AWS-SDK:4
+    eu-north-1:
+      Layer: arn:aws:lambda:eu-north-1:642425348156:layer:AWSLambda-Python-AWS-SDK:4
+    eu-west-2:
+      Layer: arn:aws:lambda:eu-west-2:142628438157:layer:AWSLambda-Python-AWS-SDK:4
+    eu-west-3:
+      Layer: arn:aws:lambda:eu-west-3:959311844005:layer:AWSLambda-Python-AWS-SDK:4
+    sa-east-1:
+      Layer: arn:aws:lambda:sa-east-1:640010853179:layer:AWSLambda-Python-AWS-SDK:4
+    us-east-2:
+      Layer: arn:aws:lambda:us-east-2:259788987135:layer:AWSLambda-Python-AWS-SDK:4
+    us-west-2:
+      Layer: arn:aws:lambda:us-west-2:420165488524:layer:AWSLambda-Python-AWS-SDK:5
+    cn-north-1:
+      Layer: arn:aws-cn:lambda:cn-north-1:683298794825:layer:AWSLambda-Python-AWS-SDK:4
+    cn-northwest-1:
+      Layer: arn:aws-cn:lambda:cn-northwest-1:382066503313:layer:AWSLambda-Python-AWS-SDK:4
+  
+Resources:
+  Createbudget:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Environment:
+        Variables:
+          SNSARN1: !Ref SNS1
+          SNSARN2: !Ref SNS2
+          EventID: "for-lambda-create-budget"
+          Thresholdmonthly: !Ref Thresholdmonthly
+          Thresholdannually: !Ref Thresholdannually
+          Credit: !Ref Credit
+      Code:
+        ZipFile: |
+            import urllib
+            import boto3
+            import io
+            import os
+            import time
+            from datetime import date            
+
+            print('Loading function')
+            # General services
+            budgets = boto3.client('budgets')
+            sts = boto3.client('sts')
+            eventbridge = boto3.client('events')
+            SNSARN1 = os.environ['SNSARN1']
+            SNSARN2 = os.environ['SNSARN2']
+            myname = os.environ['AWS_LAMBDA_FUNCTION_NAME']
+            EventID = os.environ['EventID']
+            Threshold_monthly = os.environ['Thresholdmonthly']
+            Threshold_annually = os.environ['Thresholdannually']
+            Credit = os.environ['Credit']
+            # Values            
+
+            def lambda_handler(event, context):
+                response = sts.get_caller_identity()
+                payeraccountid = response["Account"]
+                today = date.today()
+                current_time = time.time()
+                budgetname1 = payeraccountid+"_monthly_"+str(today)+"_"+str(current_time)
+                budgetname2 = payeraccountid+"_annually_"+str(today)+"_"+str(current_time)
+                if Credit =="true":
+                          response = budgets.create_budget(
+                                AccountId=payeraccountid,
+                                Budget={
+                                'BudgetName': budgetname1,
+                                'BudgetLimit': {
+                                'Amount': Threshold_monthly,
+                                'Unit': 'USD'
+                                  },
+                            'CostTypes': {
+                                'IncludeTax': True,
+                                'IncludeSubscription': True,
+                                'UseBlended': False,
+                                'IncludeRefund': False,
+                                'IncludeCredit': True,
+                                'IncludeUpfront': True,
+                                'IncludeRecurring': True,
+                                'IncludeOtherSubscription': True,
+                                'IncludeSupport': True,
+                                #'IncludeDiscount': False,
+                                'UseAmortized': False
+                            },
+                            'TimeUnit': 'MONTHLY',
+                            'BudgetType': 'COST',
+                           },
+                                NotificationsWithSubscribers=[
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                    'Threshold': 100,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN1
+                                    },
+                                    ]
+                            },
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                      'Threshold': 80,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN
+                                    },
+                                ]
+                            },
+                           {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                      'Threshold': 99,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN2
+                                    },
+                                ]
+                            },
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                    'Threshold': 120,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN1
+                                    },
+                                ]
+                            },
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                    'Threshold': 150,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN1
+                                    },
+                                ]
+                            },
+                             ]
+                            )
+                          response = budgets.create_budget(
+                                AccountId=payeraccountid,
+                                Budget={
+                                'BudgetName': budgetname2,
+                                'BudgetLimit': {
+                                'Amount': Threshold_annually,
+                                'Unit': 'USD'
+                                  },
+                            'CostTypes': {
+                                'IncludeTax': True,
+                                'IncludeSubscription': True,
+                                'UseBlended': False,
+                                'IncludeRefund': False,
+                                'IncludeCredit': True,
+                                'IncludeUpfront': True,
+                                'IncludeRecurring': True,
+                                'IncludeOtherSubscription': True,
+                                'IncludeSupport': True,
+                                #'IncludeDiscount': False,
+                                'UseAmortized': False
+                            },
+                            'TimeUnit': 'ANNUALLY',
+                            'BudgetType': 'COST',
+                           },
+                                NotificationsWithSubscribers=[
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                    'Threshold': 100,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN1
+                                    },
+                                    ]
+                            },
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                    'Threshold': 80,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN1
+                                    },
+                                ]
+                            },
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                    'Threshold': 120,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN1
+                                    },
+                                ]
+                            },
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                    'Threshold': 150,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN1
+                                    },
+                                ]
+                            },
+                             ]
+                            )
+                          
+                          print (response)
+                elif Credit =="false":
+                        response = budgets.create_budget(
+                            AccountId=payeraccountid,
+                            Budget={
+                            'BudgetName': budgetname1,
+                            'BudgetLimit': {
+                            'Amount': Threshold_monthly,
+                            'Unit': 'USD'
+                              },
+                        'CostTypes': {
+                            'IncludeTax': True,
+                            'IncludeSubscription': True,
+                            'UseBlended': False,
+                            'IncludeRefund': False,
+                            'IncludeCredit': False,
+                            'IncludeUpfront': True,
+                            'IncludeRecurring': True,
+                            'IncludeOtherSubscription': True,
+                            'IncludeSupport': True,
+                            #'IncludeDiscount': False,
+                            'UseAmortized': False
+                        },
+                        'TimeUnit': 'MONTHLY',
+                        'BudgetType': 'COST',
+                     },
+                            NotificationsWithSubscribers=[
+                        {
+                            'Notification': {
+                                'NotificationType': 'ACTUAL',
+                                'ComparisonOperator': 'GREATER_THAN',
+                                'Threshold': 100,
+                                'ThresholdType': 'PERCENTAGE',
+                                'NotificationState': 'ALARM'
+                            },
+                            'Subscribers': [
+                                {
+                                    'SubscriptionType': 'SNS',
+                                    'Address': SNSARN1
+                                },
+                                ]
+                        },
+                        {
+                            'Notification': {
+                                'NotificationType': 'ACTUAL',
+                                'ComparisonOperator': 'GREATER_THAN',
+                                'Threshold': 99,
+                                'ThresholdType': 'PERCENTAGE',
+                                'NotificationState': 'ALARM'
+                            },
+                            'Subscribers': [
+                                {
+                                    'SubscriptionType': 'SNS',
+                                    'Address': SNSARN2
+                                },
+                            ]
+                        },
+                        {
+                            'Notification': {
+                                'NotificationType': 'ACTUAL',
+                                'ComparisonOperator': 'GREATER_THAN',
+                                  'Threshold': 80,
+                                'ThresholdType': 'PERCENTAGE',
+                                'NotificationState': 'ALARM'
+                            },
+                            'Subscribers': [
+                                {
+                                    'SubscriptionType': 'SNS',
+                                    'Address': SNSARN1
+                                },
+                            ]
+                        },
+                        {
+                            'Notification': {
+                                'NotificationType': 'ACTUAL',
+                                'ComparisonOperator': 'GREATER_THAN',
+                                'Threshold': 120,
+                                'ThresholdType': 'PERCENTAGE',
+                                'NotificationState': 'ALARM'
+                            },
+                            'Subscribers': [
+                                {
+                                    'SubscriptionType': 'SNS',
+                                    'Address': SNSARN1
+                                },
+                            ]
+                        },
+                        {
+                            'Notification': {
+                                'NotificationType': 'ACTUAL',
+                                'ComparisonOperator': 'GREATER_THAN',
+                                'Threshold': 150,
+                                'ThresholdType': 'PERCENTAGE',
+                                'NotificationState': 'ALARM'
+                            },
+                            'Subscribers': [
+                                {
+                                    'SubscriptionType': 'SNS',
+                                    'Address': SNSARN1
+                                },
+                            ]
+                        },
+                      ]
+                       )
+                        response = budgets.create_budget(
+                                AccountId=payeraccountid,
+                                Budget={
+                                'BudgetName': budgetname2,
+                                'BudgetLimit': {
+                                'Amount': Threshold_annually,
+                                'Unit': 'USD'
+                                  },
+                            'CostTypes': {
+                                'IncludeTax': True,
+                                'IncludeSubscription': True,
+                                'UseBlended': False,
+                                'IncludeRefund': False,
+                                'IncludeCredit': False,
+                                'IncludeUpfront': True,
+                                'IncludeRecurring': True,
+                                'IncludeOtherSubscription': True,
+                                'IncludeSupport': True,
+                                #'IncludeDiscount': False,
+                                'UseAmortized': False
+                            },
+                            'TimeUnit': 'ANNUALLY',
+                            'BudgetType': 'COST',
+                           },
+                                NotificationsWithSubscribers=[
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                    'Threshold': 100,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN1
+                                    },
+                                    ]
+                            },
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                    'Threshold': 80,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN1
+                                    },
+                                ]
+                            },
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                    'Threshold': 120,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN1
+                                    },
+                                ]
+                            },
+                            {
+                                'Notification': {
+                                    'NotificationType': 'ACTUAL',
+                                    'ComparisonOperator': 'GREATER_THAN',
+                                    'Threshold': 150,
+                                    'ThresholdType': 'PERCENTAGE',
+                                    'NotificationState': 'ALARM'
+                                },
+                                'Subscribers': [
+                                    {
+                                        'SubscriptionType': 'SNS',
+                                        'Address': SNSARN1
+                                    },
+                                ]
+                            },
+                             ]
+                            )
+                          
+                        print (response)
+                print(response)
+                response = eventbridge.disable_rule(
+                Name=EventID
+            )
+                print(response)
+                response = eventbridge.remove_targets(
+                Rule=EventID,
+                Ids=[
+                    'TargetFunctionV1'
+                ],
+            )
+                response = eventbridge.delete_rule(
+                Name=EventID
+            )
+
+      Description: Invoke a function during stack creation.
+      TracingConfig:
+        Mode: Active
+        
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+          RoleName: !Sub lambda-${AWS::StackName}-${AWS::Region}
+          AssumeRolePolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                - lambda.amazonaws.com
+              Action:
+              - sts:AssumeRole
+          Path: "/"
+          Policies:
+          - PolicyName: root
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+              - Effect: Allow
+                Action:
+                - logs:*
+                - organizations:*
+                - s3:GetObject
+                - sns:Publish
+                - budgets:*
+                - events:*
+                - ec2:*
+                Resource: "*"
+  SNS1:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: SNS-Alert-Budget
+  SNS2:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: SNS-Stop-EC2
+  EmailSubscription11:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      TopicArn: !Ref SNS1
+      Endpoint: !Ref email1
+      Protocol: email
+  EmailSubscription12:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      TopicArn: !Ref SNS1
+      Endpoint: !Ref email2
+      Protocol: email
+  LambdaSubscription1:
+    Type: 'AWS::SNS::Subscription'
+    Condition: CreateDingding
+    Properties:
+      TopicArn: !Ref SNS1
+      Endpoint: !GetAtt DingDingnotification.Arn
+      Protocol: lambda    
+  LambdaSubscription12:
+    Type: 'AWS::SNS::Subscription'
+    Condition: CreateWechat
+    Properties:
+      TopicArn: !Ref SNS1
+      Endpoint: !GetAtt Wechatnotification.Arn
+      Protocol: lambda
+  LambdaSubscription13:
+    Type: 'AWS::SNS::Subscription'
+    Condition: StopEc2
+    Properties:
+      TopicArn: !Ref SNS2
+      Endpoint: !GetAtt LambdaStopEc2.Arn
+      Protocol: lambda    
+      
+      
+      
+
+    
+  SNSPolicy1:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument: {
+          "Version": "2008-10-17",
+          "Id": "__default_policy_ID",
+          "Statement": [
+            {
+              "Sid": "__default_statement_ID",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": "*"
+              },
+              "Action": [
+                "SNS:GetTopicAttributes",
+                "SNS:SetTopicAttributes",
+                "SNS:AddPermission",
+                "SNS:RemovePermission",
+                "SNS:DeleteTopic",
+                "SNS:Subscribe",
+                "SNS:ListSubscriptionsByTopic",
+                "SNS:Publish",
+                "SNS:Receive"
+              ],
+              "Resource": !Ref SNS1,
+              "Condition": {
+                "StringEquals": {
+                  "AWS:SourceOwner": "*"
+                }
+              }
+            },
+            {
+              "Sid": "AWSBudgets-notification-1",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "budgets.amazonaws.com"
+              },
+              "Action": "SNS:Publish",
+              "Resource": !Ref SNS1
+            },
+            {
+              "Sid": "AWSBudgets-notification-2",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "SNS:Publish",
+              "Resource": !Ref SNS1
+            }
+          ]
+        }
+      Topics: 
+        - !Ref SNS1
+  SNSPolicy2:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument: {
+          "Version": "2008-10-17",
+          "Id": "__default_policy_ID",
+          "Statement": [
+            {
+              "Sid": "__default_statement_ID",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": "*"
+              },
+              "Action": [
+                "SNS:GetTopicAttributes",
+                "SNS:SetTopicAttributes",
+                "SNS:AddPermission",
+                "SNS:RemovePermission",
+                "SNS:DeleteTopic",
+                "SNS:Subscribe",
+                "SNS:ListSubscriptionsByTopic",
+                "SNS:Publish",
+                "SNS:Receive"
+              ],
+              "Resource": !Ref SNS2,
+              "Condition": {
+                "StringEquals": {
+                  "AWS:SourceOwner": "*"
+                }
+              }
+            },
+            {
+              "Sid": "AWSBudgets-notification-1",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "budgets.amazonaws.com"
+              },
+              "Action": "SNS:Publish",
+              "Resource": !Ref SNS2
+            },
+            {
+              "Sid": "AWSBudgets-notification-2",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "SNS:Publish",
+              "Resource": !Ref SNS2
+            }
+          ]
+        }
+      Topics: 
+        - !Ref SNS2
+        
+ 
+  DingDingnotification:
+    Type: AWS::Lambda::Function
+    Condition: CreateDingding
+    Properties:
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Layers: 
+        - !FindInMap [RegionMap, !Ref "AWS::Region", Layer]
+      Environment:
+        Variables:
+          dingdingurl: !Ref Dingding
+      Code:
+        ZipFile: |
+            import json
+            import os
+            import requests
+            url = os.environ['dingdingurl']
+            def lambda_handler(event,context): # text type
+
+                message = event['Records'][0]['Sns']
+                messages = event['Records'][0]['Sns']['Message']
+                print(messages)
+                Timestamp=message['Timestamp']
+                Subject=message['Subject']
+                pagrem={
+                "msgtype":"markdown",
+                    "markdown": {"title":"AWS Alert",
+                         "text":"## "+Subject+"\n ### beijing:"+messages+" \n ### 内容："+Subject+" \n"
+                    },
+                "at": {
+                      "atMobiles":[
+                      "185xxxxxxxx"
+                      ]
+                },
+                    "isAtAll": "true"
+                }
+                headers={
+                    'Content-Type':'application/json'
+                }
+                requests.post(url,data=json.dumps(pagrem),headers=headers)
+
+      Description: Send Dingding Notification if budget is alerted 
+      TracingConfig:
+        Mode: Active
+
+  Wechatnotification:
+    Type: AWS::Lambda::Function
+    Condition: CreateWechat
+    Properties:
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Layers: 
+        - !FindInMap [RegionMap, !Ref "AWS::Region", Layer]
+      Environment:
+        Variables:
+          wechatbotURL: !Ref wechatbotURL
+
+      Code:
+        ZipFile: |
+            import json
+            import requests
+            import os 
+
+
+            send_url = os.getenv('wechatbotURL')
+
+            def lambda_handler(event, context):
+                messages = event['Records'][0]['Sns']['Message']
+                print(messages)
+                msg = "Alarm Details:\n"+messages
+                headers = {"Content-Type": "text/plain"}
+                send_data ={
+                        "msgtype": "text",
+                        "text": {
+                            "content": msg,
+                            "mentioned_list": ["@all"]
+                        }
+                    }
+
+                res = requests.post(url=send_url, headers=headers, json=send_data)
+                print(res.text)
+
+      Description: Send Wechat Notification if budget is alerted 
+      TracingConfig:
+        Mode: Active
+  LambdaStopEc2:
+    Type: AWS::Lambda::Function
+    Condition: StopEc2
+    Properties:
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+
+      Code:
+        ZipFile: |
+            import json
+            import os 
+            import boto3
+            ec2 = boto3.client('ec2')
+            def lambda_handler(event, context):
+                response = ec2.describe_instance_status(
+                                Filters=[
+                       {
+                          'Name': 'system-status.status',
+                          'Values': [
+                                'ok',
+                            ]
+                         },
+                     ],
+                 MaxResults=123,
+                 DryRun=False,
+                 IncludeAllInstances=False
+                )
+                print (response)
+                for i in response['InstanceStatuses']:
+                       result = ec2.stop_instances(
+                        InstanceIds=[
+                             i['InstanceId'],
+                            ],
+                                )
+                       print(result)
+
+      Description: Stop EC2 when budget reach 99%
+      TracingConfig:
+        Mode: Active
+
+
+
+  ScheduledRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "ScheduledRule"
+      ScheduleExpression: "rate(1 minute)"
+      State: "ENABLED"
+      Name: "for-lambda-create-budget"
+      Targets: 
+        - 
+          Arn: 
+            Fn::GetAtt: 
+              - "Createbudget"
+              - "Arn"
+          Id: "TargetFunctionV1"
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref "Createbudget"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+          - "ScheduledRule"
+          - "Arn"
+  PermissionForSNS1ToInvokeLambda1: 
+    Type: AWS::Lambda::Permission
+    Condition: CreateDingding
+    Properties: 
+      FunctionName: !Ref "DingDingnotification"
+      Action: "lambda:InvokeFunction"
+      Principal: "sns.amazonaws.com"
+      SourceArn: !Ref SNS1
+
+  PermissionForSNS2ToInvokeLambda3: 
+    Type: AWS::Lambda::Permission
+    Condition: StopEc2
+    Properties: 
+      FunctionName: !Ref "LambdaStopEc2"
+      Action: "lambda:InvokeFunction"
+      Principal: "sns.amazonaws.com"
+      SourceArn: !Ref SNS2
+
+
+
+
+
